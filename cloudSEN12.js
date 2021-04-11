@@ -1,4 +1,230 @@
 /**
+ * Converts RGB component integer to hex string.
+ * 
+ * @param {Number} c An integer between 0 and 255 that represents color
+ *     intensity.
+ * @returns {String}
+ * @ignore
+ */
+function componentToHex(c) {
+  var hex = c.toString(16);
+  return hex.length == 1 ? '0' + hex : hex;
+}
+
+/**
+ * Converts RGB integer set to hex string.
+ * 
+ * @param {Array} rgb Array of three integers with range [0, 255] that
+ *     respectively represent red, green, and blue intensity.
+ * @returns {String}
+ * @ignore
+ */
+function rgbToHex(rgb) {
+  return "#" +
+  componentToHex(rgb[0]) +
+  componentToHex(rgb[1]) +
+  componentToHex(rgb[2]);
+}
+
+/**
+ * Scales input number to 8-bit range.
+ * 
+ * @param {Number} val A value to clamp between a given range and scale to
+ *     8-bit representation.
+ * @param {Number} min The minimum value to clamp the input number to.
+ * @param {Number} max The maximum value to clamp the input number to.
+ * @returns {Number}
+ * @ignore
+ */
+function scaleToByte(val, min, max) {
+  val = ee.Number.clamp(val, min, max);
+  return ee.Number.expression({
+    expression: 'round((val - min) / (max - min) * 255)',
+    vars: {
+      val: val,
+      min: min,
+      max: max
+    } 
+  });
+}
+
+/**
+ * Plots a chart to a ui.Panel or the Code Editor Console for a multi-band image
+ * time series. Observations are represented as circles whose color is the
+ * stretched RGB representation of three selected bands.
+ * 
+ * @param {ee.ImageCollection} col An image collection representing a time
+ *     series of multi-band images. Each image must have a 'system:time_start'
+ *     property formatted as milliseconds since the 1970-01-01T00:00:00Z (UTC).
+ * @param {ee.Geometry} aoi The region over which to reduce the image data.
+ * @param {String} yAxisBand The name of the image band whose region reduction
+ *     will be plot along the chart's y-axis.
+ * @param {Object} visParams Visualization parameters that assign bands to
+ *     red, green, and blue and the range to stretch color intensity over.
+ * @param {Array} visParams.bands An array of three band names to respectively
+ *     assign to red, green, and blue for RGB visualization.
+ * @param {Array} visParams.min An array of three band-specific values that
+ *     define the minimum value to clamp the color stretch range to. Arrange the
+ *     values in the same order as visParams.bands band names. Use units of the
+ *     input image data.
+ * @param {Array} visParams.max An array of three band-specific values that
+ *     define the maximum value to clamp the color stretch range to. Arrange the
+ *     values in the same order as visParams.bands band names. Use units of the
+ *     input image data.
+ * @param {ui.Panel|String} plotHere Either a ui.Panel to add the chart to or
+ *     'console' to print the chart to the Code Editor console.
+ * @param {Object} [optionalParams] Optional. A set of optional parameters to set for
+ *     controling region reduction and stying the chart.
+ * @param {ee.Reducer} [optionalParams.reducer] Optional. The region over which
+ *     to reduce data. If unspecified, ee.Reducer.first is used.
+ * @param {String} [optionalParams.crs] Optional. The projection to work in. If
+ *     unspecified, the projection of the first image is used.
+ * @param {Number} [optionalParams.scale] Optional. A nominal scale in meters of
+ *     the projection to work in. If unspecified, the nominal scale of the first
+ *     image is used.
+ * @param {Object} [optionalParams.chartParams] Optional. ui.Chart parameters
+ *     accepected by ui.Chart.setOptions. See
+ *     https://developers.google.com/earth-engine/guides/charts_style for
+ *     more details.
+ */
+function rgbTimeSeriesChart(
+  col, aoi, yAxisBand, visParams, plotHere, optionalParams, startDate, ll , ul) {
+  // Since using evaluate, indicate that things are working.
+  var message = '⚙️ Processing, please wait.';
+  if(plotHere != 'console') {
+    plotHere.clear();
+    plotHere.add(ui.Label(message));
+  } else {
+    print(message);
+  }
+  
+  // Define default filter parameters.
+  var proj = col.first().projection();
+  var _params = {
+    reducer: ee.Reducer.mean(),
+    crs: proj.crs(),
+    scale: proj.nominalScale(),
+    chartParams: {
+      // pointSize: 10,
+      legend: {position: 'none'},
+      hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
+      vAxis: {title: yAxisBand, titleTextStyle: {italic: false, bold: true}},
+      interpolateNulls: true
+    }
+  };
+  
+  
+  // Replace default params with provided params.
+  if (optionalParams) {
+    for (var param in optionalParams) {
+      _params[param] = optionalParams[param] || _params[param];
+    }
+  }
+  
+  // Perform reduction.
+  var fc = col.map(function(img) {
+    var reduction = img.reduceRegion({
+      reducer: _params.reducer,
+      geometry: aoi,
+      scale: _params.scale,
+      crs: _params.crs,
+      bestEffort: true,
+      maxPixels: 1e13,
+    });
+    
+    return ee.Feature(null, reduction).set({
+      'system:time_start': img.get('system:time_start'),
+      label: ee.String(yAxisBand+' ').cat(img.date().format('YYYY-MM-dd'))
+    });
+  })
+  .filter(ee.Filter.notNull(col.first().bandNames()));
+  
+  // Add 3-band RGB color as a feature property.
+  var fcRgb = fc.map(function(ft) {
+    var rgb = ee.List([
+      scaleToByte(ft.get(visParams.bands[0]), visParams.min[0], visParams.max[0]),
+      scaleToByte(ft.get(visParams.bands[1]), visParams.min[1], visParams.max[1]),
+      scaleToByte(ft.get(visParams.bands[2]), visParams.min[2], visParams.max[2])
+    ]);
+    return ft.set({rgb: rgb});
+  });
+
+  // Filter out observations with no data.
+  fcRgb = fcRgb.filter(ee.Filter.notNull(fcRgb.first().propertyNames()));
+  
+  // Get the list of RGB colors.
+  var rgbColors = fcRgb.aggregate_array('rgb');
+
+  // BEGIN_EDIT //
+  var hiStart = {label: 'hampel_Hi-limit', 'system:time_start': 1546297200000}
+  hiStart[yAxisBand] = ul
+  
+  var hiEnd = {label: 'hampel_Hi-limit', 'system:time_start': 1625090400000}
+  hiEnd[yAxisBand] = ul
+  
+  var loStart = {label: 'hampel_Lo-limit', 'system:time_start':1546297200000}
+  loStart[yAxisBand] = ll
+  
+  var loEnd = {label: 'hampel_Lo-limit', 'system:time_start': 1625090400000}
+  loEnd[yAxisBand] = ll
+
+  var hiColor = '#ff0000'  // red
+  var loColor = '#0000ff'  // blue
+  
+  fcRgb = fcRgb.merge(ee.FeatureCollection([
+    ee.Feature(null, hiStart),
+    ee.Feature(null, hiEnd),
+    ee.Feature(null, loStart),
+    ee.Feature(null, loEnd)
+  ]))
+  // END_EDIT //
+
+
+  
+  // Make a chart.
+  rgbColors.evaluate(function(rgbColors) {
+    var rgbList = [];
+    for(var i=0; i<rgbColors.length; i++) {
+      rgbList.push(rgbToHex(rgbColors[i]));
+    }
+    
+    
+
+    // BEGIN_EDIT //
+    rgbList = [hiColor, loColor].concat(rgbList)
+    var len = rgbList.length
+    var hiSeriesIndex = 0
+    var loSeriesIndex = 1
+    
+    _params.chartParams['series'] = {
+      0: {lineWidth: 5, pointSize: 0, pointsVisible: false, visibleInLegend: true},
+      1: {lineWidth: 5, pointSize: 0, pointsVisible: false, visibleInLegend: true}
+    }
+    // END_EDIT //
+    
+    
+    _params.chartParams['colors'] = rgbList;
+
+    var chart = ui.Chart.feature.groups(
+      fcRgb, 'system:time_start', yAxisBand, 'label')
+      .setChartType('ScatterChart')
+      .setOptions(_params.chartParams);
+    
+    if(plotHere != 'console'){
+      plotHere.clear();
+      plotHere.add(chart);
+    } else {
+      print(chart);
+    }
+  });
+}
+
+
+
+
+
+
+/**
  * @license
  * Copyright 2021 Justin Braaten
  *
@@ -20,8 +246,8 @@
 // #############################################################################
 
 // RGB time series charting module: https://github.com/jdbcode/ee-rgb-timeseries
-var rgbTs = require(
-  'users/jstnbraaten/modules:rgb-timeseries/rgb-timeseries.js'); 
+// var rgbTs = require(   // <-- EDIT: comment out
+//   'users/jstnbraaten/modules:rgb-timeseries/rgb-timeseries.js');  // <-- EDIT: comment out
 
 // Landsat collection builder module: https://jdbcode.github.io/EE-LCB/
 var lcb = require('users/jstnbraaten/modules:ee-lcb.js');  
@@ -47,10 +273,6 @@ var initLat = 36.46517;
 var latUrl = ui.url.get('lat', initLat);
 ui.url.set('lat', latUrl);
 
-var initIndex = 'NBR';
-var indexUrl = ui.url.get('index', initIndex);
-ui.url.set('index', indexUrl);
-
 var initRgb = 'SWIR1/NIR/GREEN';
 var rgbUrl = ui.url.get('rgb', initRgb);
 ui.url.set('rgb', rgbUrl);
@@ -68,20 +290,6 @@ var initDay = 12;
 var initDayUrl = ui.url.get('initDay', initDay);
 ui.url.set('initDay', initDayUrl);
 
-// Last date
-var lastYear = 2019;
-var lastYearUrl = ui.url.get('lastYear', lastYear);
-ui.url.set('lastYear', lastYearUrl);
-
-var lastMonth = 2;
-var lastMonthUrl = ui.url.get('lastMonth', lastMonth);
-ui.url.set('lastMonth', lastMonthUrl);
-
-var lastDay = 12;
-var lastDayUrl = ui.url.get('lastDay', lastDay);
-ui.url.set('lastDay', lastDayUrl);
-
-
 var initCloud = 30;
 var cloudUrl = ui.url.get('cloud', initCloud);
 ui.url.set('cloud', cloudUrl);
@@ -94,6 +302,29 @@ var imgid = '20190212T142031_20190212T143214_T19FDF';
 var imgidUrl = ui.url.get('imgid', imgid);
 ui.url.set('imgid', imgidUrl);
 
+var ll_b1 = -1;
+var llb1Url = ui.url.get('llb1', ll_b1);
+ui.url.set('llb1', llb1Url);
+
+var ul_b1 = 1;
+var ulb1Url = ui.url.get('ulb1', ul_b1);
+ui.url.set('ulb1', ulb1Url);
+
+var ll_ndvi = -1;
+var llndviUrl = ui.url.get('llndvi', ll_ndvi);
+ui.url.set('llndvi', llndviUrl);
+
+var ul_ndvi = 1;
+var ulndviUrl = ui.url.get('ulndvi', ul_ndvi);
+ui.url.set('ulndvi', ulndviUrl);
+
+var ll_b11 = -1;
+var llb11Url = ui.url.get('llb11', ll_b11);
+ui.url.set('llb11', llb11Url);
+
+var ul_b11 = 1;
+var ulb11Url = ui.url.get('ulb11', ul_b11);
+ui.url.set('ulb11', ulb11Url);
 
 // #############################################################################
 // ### DEFINE UI ELEMENTS ###
@@ -154,14 +385,13 @@ var aboutLabel = ui.Label(
   'datasets and locations for images collected within two years of today. Time series ' +
   'point colors are defined by RGB assignment to selected bands where ' +
   'intensity is based on the area-weighted mean pixel value within a radius ' +
-  'around the clicked point in the map (100 m for Sentinel-2, 45 m for Landsat-8).' +
-  'Created by Justin Braaten adapted for CloudSEN12 by @csaybar and @LeslyAracelly',
+  'around the clicked point in the map (30 m for Sentinel-2, 45 m for Landsat-8).',
   infoFont);
 
 var appCodeLink = ui.Label({
   value: 'App source code',
   style: {fontSize: '11px', color: '#505050', margin: '-4px 8px 0px 8px'}, 
-  targetUrl: 'https://github.com/LBautistaB13/ee-rgb-timeseries/blob/main/eo-timeseries-explorer.js'
+  targetUrl: 'https://github.com/jdbcode/ee-rgb-timeseries/blob/main/eo-timeseries-explorer.js'
 });
 
 
@@ -194,6 +424,16 @@ var rgbSelect = ui.Select({
   value: ui.url.get('rgb'), style: {stretch: 'horizontal'}
 });
 var rgbPanel = ui.Panel([rgbLabel, rgbSelect], null, {stretch: 'horizontal'});
+
+// Duration.
+var durationLabel = ui.Label(
+  {value: 'Duration (months prior)', style: headerFont});
+var durationSlider = ui.Slider({
+  min: 1, max: 24 , value: parseInt(ui.url.get('duration')),
+  step: 1, style: {stretch: 'horizontal'}
+});
+var durationPanel = ui.Panel(
+  [durationLabel, durationSlider], null, {stretch: 'horizontal'});
 
 // Cloud threshold.
 var cloudLabel = ui.Label(
@@ -230,6 +470,7 @@ var chartPanel = ui.Panel();
 var chartPanel2 = ui.Panel();
 var chartPanel3 = ui.Panel();
 
+
 // Holder for image cards.
 var imgCardPanel = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal', true),
@@ -261,7 +502,6 @@ var mapChartSplitPanel = ui.Panel(ui.SplitPanel({
   wipe: false,
 }));
 
-
 // Map/chart and image card panel
 var splitPanel = ui.SplitPanel(mapChartSplitPanel, imgCardPanel);
 
@@ -286,10 +526,10 @@ var CLICKED = false;
 // Set region reduction and chart params.
 var OPTIONAL_PARAMS = {
   reducer: ee.Reducer.mean(),
-  scale: 100,
+  scale: 20,
   crs: 'EPSG:4326',
   chartParams: {
-    pointSize: 11,
+    // pointSize: 11,
     legend: {position: 'none'},
     hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
     vAxis: {
@@ -304,7 +544,7 @@ var sensorInfo = {
   'Landsat-8 SR': {
     id: 'LANDSAT/LC08/C01/T1_SR',
     scale: 30,
-    aoiRadius: 45,
+    aoiRadius: 100,
     index: {
       NBR: 'NBR',
       NDVI: 'NDVI',
@@ -345,7 +585,7 @@ var sensorInfo = {
   'Landsat-8 TOA': {
     id: 'LANDSAT/LC08/C01/T1_TOA',
     scale: 30,
-    aoiRadius: 45,
+    aoiRadius: 100,
     index: {
       NBR: 'NBR',
       NDVI: 'NDVI',
@@ -427,7 +667,7 @@ var sensorInfo = {
   'Sentinel-2 TOA': {
     id: 'COPERNICUS/S2',
     scale: 20,
-    aoiRadius: 30,
+    aoiRadius: 100,
     index: {
       NBR: 'NBR',
       NDVI: 'NDVI',
@@ -539,7 +779,7 @@ function addDate(img) {
 /**
  * Gathers all Landsat into a collection.
  */
-function getLandsatCollection(aoi, startDate, endDate, cloudthresh, id) {
+function getLandsatCollection(aoi, startDate, cloudthresh, id) {
   var oliCol = ee.ImageCollection(id)
     .filterBounds(aoi)
     .filterDate(startDate, endDate)
@@ -549,16 +789,42 @@ function getLandsatCollection(aoi, startDate, endDate, cloudthresh, id) {
   return oliCol;
 }
 
+
+
+// get before month
+var get_the_previous_month = function(month_n) {
+  if (month_n <= 1) {
+    var a = month_n + 11;
+  } else {
+    var a = month_n - 1;
+  }
+  return a
+}
+
+// get after month
+var get_the_after_month = function(month_n) {
+  if (month_n >= 12) {
+    var a = month_n - 11;
+  } else {
+    var a = month_n + 1;
+  }
+  return a
+}
+
+
 /**
  * Join S2 SR and S2 cloudless.
  */
-function getS2SrCldCol(aoi, startDate, endDate, cloudthresh, id) {
+function getS2SrCldCol(aoi, startDate, cloudthresh, id) {
+  var before_month = get_the_previous_month(ui.url.get("initMonth"));
+  var after_month = get_the_after_month(ui.url.get("initMonth"));
+  
   var s2SrCol = ee.ImageCollection(id)
     .filterBounds(aoi)
-    .filterDate(startDate, endDate)
+    .filter(ee.Filter.calendarRange(before_month, after_month, "month"))
     .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloudthresh))
     .merge(ee.Image("COPERNICUS/S2_SR/" + ui.url.get("imgid")));
-      
+  
   return s2SrCol.map(addBandsS2).map(addDate);
 }
 
@@ -638,15 +904,14 @@ function renderGraphics(coords) {
 
   var cloudThresh = cloudSlider.getValue();
   var datasetId = sensorInfo[sensor]['id'];
-  var endDate = new Date(ui.url.get("lastYear"),  ui.url.get("lastMonth"),  ui.url.get("lastDay"));
   var startDate = ee.Date.fromYMD(ui.url.get("initYear"),  ui.url.get("initMonth"),  ui.url.get("initDay"));
-  
+
   // Build the collection.
   var col;
   if(sensor == 'Sentinel-2 SR' | sensor == 'Sentinel-2 TOA') {
-    col = getS2SrCldCol(aoiBox, startDate, endDate, cloudThresh, datasetId);
+    col = getS2SrCldCol(aoiBox, startDate, cloudThresh, datasetId);
   } else if(sensor == 'Landsat-8 SR' | sensor == 'Landsat-8 TOA') {
-    col = getLandsatCollection(aoiBox, startDate, endDate, cloudThresh, datasetId);
+    col = getLandsatCollection(aoiBox, startDate,  cloudThresh, datasetId);
   }
 
   col = ee.ImageCollection(col.distinct('date')).sort('system:time_start');
@@ -654,62 +919,68 @@ function renderGraphics(coords) {
   // Display the image chip time series. 
   displayBrowseImg(col, aoiBox, aoiCircle);
 
-
-  // Render the time series chart.
-  // Blue
   OPTIONAL_PARAMS['chartParams']['vAxis']['title'] = indexSelect.getValue();
   OPTIONAL_PARAMS['scale'] = sensorInfo[sensorSelect.getValue()]['scale'];
-
-  rgbTs.rgbTimeSeriesChart(col, aoiCircle,
+  
+  // Render the time series chart.
+  var ul = parseInt(ui.url.get('ulb1'))
+  var ll = parseInt(ui.url.get('llb1'))
+  
+  rgbTimeSeriesChart(col, aoiCircle,  // <-- EDIT rgbTs.rgbTimeSeriesChart(col, aoiCircle,
     sensorInfo[sensorSelect.getValue()]['index'][indexSelect.getValue()],
     sensorInfo[sensorSelect.getValue()]['rgb'][rgbSelect.getValue()],
-    chartPanel, OPTIONAL_PARAMS);
-
-  // NDVI
+    chartPanel, OPTIONAL_PARAMS, startDate, ll, ul);
+    
   var OPTIONAL_PARAMS2 = {
-  reducer: ee.Reducer.mean(),
-  scale: 20,
-  crs: 'EPSG:4326',
-  chartParams: {
-    pointSize: 11,
-    legend: {position: 'none'},
-    hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
-    vAxis: {
-      title: "NDVI",
-      titleTextStyle: {italic: false, bold: true}
-    },
-    explorer: {axis: 'horizontal'}
-    }
+    reducer: ee.Reducer.mean(),
+    scale: 20,
+    crs: 'EPSG:4326',
+    chartParams: {
+      pointSize: 11,
+      legend: {position: 'none'},
+      hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
+      vAxis: {
+        title: "NDVI",
+        titleTextStyle: {italic: false, bold: true}
+      },
+      explorer: {axis: 'horizontal'}
+      }
   };
+    
+  // Render the time series chart.
+  ul = parseFloat(ui.url.get('ulndvi'))
+  ll = parseFloat(ui.url.get('llndvi'))
 
-  rgbTs.rgbTimeSeriesChart(col, aoiCircle,
+  rgbTimeSeriesChart(col, aoiCircle,  // <-- EDIT rgbTs.rgbTimeSeriesChart(col, aoiCircle,
     "NDVI",
     sensorInfo[sensorSelect.getValue()]['rgb'][rgbSelect.getValue()],
-    chartPanel2, OPTIONAL_PARAMS2);
-  
-  
+    chartPanel2, OPTIONAL_PARAMS2, startDate,  ll, ul);
+    
   // SWIR1
   var OPTIONAL_PARAMS3 = {
-  reducer: ee.Reducer.mean(),
-  scale: 20,
-  crs: 'EPSG:4326',
-  chartParams: {
-    pointSize: 11,
-    legend: {position: 'none'},
-    hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
-    vAxis: {
-      title: "SWIR1",
-      titleTextStyle: {italic: false, bold: true}
-    },
-    explorer: {axis: 'horizontal'}
-    }
+    reducer: ee.Reducer.mean(),
+    scale: 20,
+    crs: 'EPSG:4326',
+    chartParams: {
+      pointSize: 11,
+      legend: {position: 'none'},
+      hAxis: {title: 'Date', titleTextStyle: {italic: false, bold: true}},
+      vAxis: {
+        title: "SWIR1",
+        titleTextStyle: {italic: false, bold: true}
+      },
+      explorer: {axis: 'horizontal'}
+      }
   };
-  
-  
-  rgbTs.rgbTimeSeriesChart(col, aoiCircle,
+    
+  // Render the time series chart.
+  ul = parseInt(ui.url.get('ulb11'))
+  ll = parseInt(ui.url.get('llb11'))
+
+  rgbTimeSeriesChart(col, aoiCircle,  // <-- EDIT rgbTs.rgbTimeSeriesChart(col, aoiCircle,
     "B11",
     sensorInfo[sensorSelect.getValue()]['rgb'][rgbSelect.getValue()],
-    chartPanel3, OPTIONAL_PARAMS3);
+    chartPanel3, OPTIONAL_PARAMS3, startDate, ll, ul);
     
 }
 
@@ -740,6 +1011,7 @@ function setParams() {
   ui.url.set('sensor', sensorSelect.getValue());
   ui.url.set('index', indexSelect.getValue());
   ui.url.set('rgb', rgbSelect.getValue());
+  ui.url.set('duration', durationSlider.getValue());
   ui.url.set('cloud', cloudSlider.getValue());
   ui.url.set('chipwidth', regionWidthSlider.getValue());
 }   
@@ -819,6 +1091,7 @@ controlElements.add(optionsLabel);
 controlElements.add(sensorPanel);
 controlElements.add(indexPanel);
 controlElements.add(rgbPanel);
+controlElements.add(durationPanel);
 controlElements.add(cloudPanel);
 controlElements.add(regionWidthPanel);
 controlElements.add(submitButton);
@@ -835,6 +1108,7 @@ controlButton.onClick(controlButtonHandler);
 sensorSelect.onChange(optionChange);
 rgbSelect.onChange(optionChange);
 indexSelect.onChange(optionChange);
+durationSlider.onChange(optionChange);
 cloudSlider.onChange(optionChange);
 regionWidthSlider.onChange(optionChange);
 submitButton.onClick(handleSubmitClick);
