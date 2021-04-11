@@ -9,6 +9,12 @@
 
 ## Cloud visual inspection vizualizator - Google Earth Engine App
 
+<center>
+  <a href=https://csaybar.users.earthengine.app/view/demo02#run=true;sensor=Sentinel-2%20SR;lon=-69.76606;lat=-48.99801;index=Blue;rgb=RED%2FGREEN%2FBLUE;initYear=2019;initMonth=2;initDay=12;cloud=5;chipwidth=1;imgid=20190212T142031_20190212T143214_T19FDF;llb1=763.743612800034;ulb1=1218.71887923383;llndvi=0.0688391460953984;ulndvi=0.160478652095398;llb11=2345.39890977067;ulb11=3520.32481478227;>
+    <img src=https://user-images.githubusercontent.com/54723897/114320875-6458e580-9b18-11eb-9ad5-4fc45e2c6441.png>
+  </a>
+</center>
+
 ### Why we create this app?
 
 This Google Earth Engine App helps labelers to recognize if a pixel is a cloud. Opaque clouds are easily to identify, however, semi-transparent clouds could be a challenge. In cloudSEN12 we considerate that a pixel is a cloud is it meet the following requirements.
