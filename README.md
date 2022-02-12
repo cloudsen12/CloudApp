@@ -57,7 +57,7 @@ independent votes among all members**.
 	
 ## Acknowledgment
 
-The cloudApp is based on the fantastic tool [**ee-rgb-timeseries**](https://github.com/jdbcode/ee-rgb-timeseries) created by [Justin Braaten](https://github.com/jdbcode).
+cloudApp is based on the fantastic tool [**ee-rgb-timeseries**](https://github.com/jdbcode/ee-rgb-timeseries) created by [Justin Braaten](https://github.com/jdbcode).
 
 This project gratefully acknowledges:
 
